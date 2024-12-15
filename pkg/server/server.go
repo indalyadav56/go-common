@@ -139,6 +139,8 @@ func (s *server) setupRoutes() {
 func (s *server) Start(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
+		serverURL := fmt.Sprintf("http://localhost:%d", s.cfg.Port)
+		fmt.Printf("Server is running on %s\n", serverURL)
 		if err := s.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
