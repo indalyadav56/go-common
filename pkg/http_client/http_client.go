@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
-	"sync"
+	"os"
 )
 
 type Client interface {
@@ -18,8 +19,9 @@ type Client interface {
 	Patch(ctx context.Context, endpoint string) RequestBuilder
 	Delete(ctx context.Context, endpoint string) RequestBuilder
 
-	Batch() BatchRequest
-	Pool(workers int) RequestPool
+	// Authentication methods
+	SetBearerToken(token string) Client
+	WithBasicAuth(username, password string) Client
 }
 
 type RequestBuilder interface {
@@ -28,6 +30,7 @@ type RequestBuilder interface {
 	SetBody(body interface{}) RequestBuilder
 	SetQueryParam(key, value string) RequestBuilder
 	SetQueryParams(params map[string]string) RequestBuilder
+	AddFile(fieldName, filePath string) RequestBuilder
 	OnSuccess(fn func(*Response)) RequestBuilder
 	OnError(fn func(*RequestError)) RequestBuilder
 	SetError(v interface{}) RequestBuilder
@@ -55,7 +58,11 @@ type client struct {
 	baseURL       string
 	globalHeaders map[string]string
 	interceptor   http.RoundTripper
-	pool          sync.Pool
+	bearerToken   string
+	basicAuth     struct {
+		Username string
+		Password string
+	}
 }
 
 type request struct {
@@ -65,6 +72,7 @@ type request struct {
 	ctx            context.Context
 	headers        map[string]string
 	body           interface{}
+	files          map[string]string
 	queryParams    map[string]string
 	successHandler func(*Response)
 	errorHandler   func(*RequestError)
@@ -73,24 +81,6 @@ type request struct {
 	executed       bool
 	response       *Response
 	err            error
-}
-
-type batchRequest struct {
-	client    *client
-	requests  []RequestBuilder
-	responses []*Response
-	errors    []error
-	mu        sync.Mutex
-	wg        sync.WaitGroup
-}
-
-type requestPool struct {
-	client   *client
-	workers  int
-	jobs     chan RequestBuilder
-	results  chan Result
-	wg       sync.WaitGroup
-	shutdown chan struct{}
 }
 
 func New(config ...Config) Client {
@@ -112,174 +102,87 @@ func New(config ...Config) Client {
 		interceptor:   cfg.Interceptor,
 	}
 
-	c.pool.New = func() interface{} {
-		return &request{client: c}
-	}
-
 	return c
 }
 
-func (c *client) Batch() BatchRequest {
-	return &batchRequest{
-		client:    c,
-		requests:  make([]RequestBuilder, 0),
-		responses: make([]*Response, 0),
-		errors:    make([]error, 0),
-	}
-}
-
-func (c *client) Pool(workers int) RequestPool {
-	if workers <= 0 {
-		workers = 10 // Default number of workers
-	}
-
-	pool := &requestPool{
-		client:   c,
-		workers:  workers,
-		jobs:     make(chan RequestBuilder),
-		results:  make(chan Result),
-		shutdown: make(chan struct{}),
-	}
-
-	// Start workers
-	pool.start()
-
-	return pool
-}
-
 func (c *client) Get(ctx context.Context, endpoint string) RequestBuilder {
-	req := c.pool.Get().(*request)
-	req.reset()
-	req.method = http.MethodGet
-	req.endpoint = endpoint
-	req.ctx = ctx
-	return req
+	return &request{
+		client:      c,
+		method:      http.MethodGet,
+		endpoint:    endpoint,
+		ctx:         ctx,
+		headers:     make(map[string]string),
+		queryParams: make(map[string]string),
+		files:       make(map[string]string),
+	}
 }
 
 func (c *client) Post(ctx context.Context, endpoint string) RequestBuilder {
-	req := c.pool.Get().(*request)
-	req.reset()
-	req.method = http.MethodPost
-	req.endpoint = endpoint
-	req.ctx = ctx
-	return req
+	return &request{
+		client:      c,
+		method:      http.MethodPost,
+		endpoint:    endpoint,
+		ctx:         ctx,
+		headers:     make(map[string]string),
+		queryParams: make(map[string]string),
+		files:       make(map[string]string),
+	}
 }
 
 func (c *client) Put(ctx context.Context, endpoint string) RequestBuilder {
-	req := c.pool.Get().(*request)
-	req.reset()
-	req.method = http.MethodPut
-	req.endpoint = endpoint
-	req.ctx = ctx
-	return req
+	return &request{
+		client:      c,
+		method:      http.MethodPut,
+		endpoint:    endpoint,
+		ctx:         ctx,
+		headers:     make(map[string]string),
+		queryParams: make(map[string]string),
+		files:       make(map[string]string),
+	}
 }
 
 func (c *client) Patch(ctx context.Context, endpoint string) RequestBuilder {
-	req := c.pool.Get().(*request)
-	req.reset()
-	req.method = http.MethodPatch
-	req.endpoint = endpoint
-	req.ctx = ctx
-	return req
+	return &request{
+		client:      c,
+		method:      http.MethodPatch,
+		endpoint:    endpoint,
+		ctx:         ctx,
+		headers:     make(map[string]string),
+		queryParams: make(map[string]string),
+		files:       make(map[string]string),
+	}
 }
 
 func (c *client) Delete(ctx context.Context, endpoint string) RequestBuilder {
-	req := c.pool.Get().(*request)
-	req.reset()
-	req.method = http.MethodDelete
-	req.endpoint = endpoint
-	req.ctx = ctx
-	return req
-}
-
-// Request pool implementation
-func (p *requestPool) start() {
-	for i := 0; i < p.workers; i++ {
-		p.wg.Add(1)
-		go p.worker()
+	return &request{
+		client:      c,
+		method:      http.MethodDelete,
+		endpoint:    endpoint,
+		ctx:         ctx,
+		headers:     make(map[string]string),
+		queryParams: make(map[string]string),
+		files:       make(map[string]string),
 	}
 }
 
-func (p *requestPool) worker() {
-	defer p.wg.Done()
-
-	for {
-		select {
-		case job := <-p.jobs:
-			resp, err := job.Result()
-			p.results <- Result{Response: resp, Error: err}
-		case <-p.shutdown:
-			return
-		}
-	}
+// SetBearerToken sets the bearer token for authentication
+func (c *client) SetBearerToken(token string) Client {
+	c.bearerToken = token
+	return c
 }
 
-func (p *requestPool) Submit(rb RequestBuilder) <-chan Result {
-	resultChan := make(chan Result, 1)
-
-	go func() {
-		resp, err := rb.Result()
-		resultChan <- Result{Response: resp, Error: err}
-		close(resultChan)
-	}()
-
-	return resultChan
-}
-
-func (p *requestPool) Wait() {
-	close(p.shutdown)
-	p.wg.Wait()
-}
-
-// Batch request implementation
-func (b *batchRequest) Add(rb RequestBuilder) BatchRequest {
-	b.requests = append(b.requests, rb)
-	return b
-}
-
-func (b *batchRequest) Execute(ctx context.Context) ([]*Response, []error) {
-	b.wg.Add(len(b.requests))
-
-	for _, req := range b.requests {
-		go func(rb RequestBuilder) {
-			defer b.wg.Done()
-			resp, err := rb.Result()
-
-			b.mu.Lock()
-			b.responses = append(b.responses, resp)
-			b.errors = append(b.errors, err)
-			b.mu.Unlock()
-		}(req)
-	}
-
-	b.wg.Wait()
-	return b.responses, b.errors
+// WithBasicAuth sets the basic auth credentials
+func (c *client) WithBasicAuth(username, password string) Client {
+	c.basicAuth.Username = username
+	c.basicAuth.Password = password
+	return c
 }
 
 // Request implementation
-func (r *request) reset() {
-	r.method = ""
-	r.endpoint = ""
-	r.ctx = nil
-	r.headers = nil
-	r.body = nil
-	r.queryParams = nil
-	r.successHandler = nil
-	r.errorHandler = nil
-	r.errorType = nil
-	r.result = nil
-	r.executed = false
-	r.response = nil
-	r.err = nil
-}
-
 func (r *request) Result() (*Response, error) {
 	if !r.executed {
 		r.execute()
 	}
-
-	// Return request to pool
-	defer r.client.pool.Put(r)
 
 	return r.response, r.err
 }
@@ -364,6 +267,11 @@ func (r *request) OnError(fn func(*RequestError)) RequestBuilder {
 	return r
 }
 
+func (r *request) AddFile(fieldName, filePath string) RequestBuilder {
+	r.files[fieldName] = filePath
+	return r
+}
+
 // Response type remains the same
 type Response struct {
 	StatusCode int
@@ -439,6 +347,49 @@ func (r *request) execute() {
 
 	// Add headers
 	r.addHeaders(req)
+
+	// Add authentication headers
+	if r.client.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+r.client.bearerToken)
+	}
+	if r.client.basicAuth.Username != "" && r.client.basicAuth.Password != "" {
+		req.SetBasicAuth(r.client.basicAuth.Username, r.client.basicAuth.Password)
+	}
+
+	// Add files
+	if len(r.files) > 0 {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		for fieldName, filePath := range r.files {
+			part, err := writer.CreateFormFile(fieldName, filePath)
+			if err != nil {
+				r.err = fmt.Errorf("failed to create form file: %w", err)
+				r.executed = true
+				return
+			}
+			file, err := os.Open(filePath)
+			if err != nil {
+				r.err = fmt.Errorf("failed to open file: %w", err)
+				r.executed = true
+				return
+			}
+			defer file.Close()
+			_, err = io.Copy(part, file)
+			if err != nil {
+				r.err = fmt.Errorf("failed to copy file: %w", err)
+				r.executed = true
+				return
+			}
+		}
+		err = writer.Close()
+		if err != nil {
+			r.err = fmt.Errorf("failed to close writer: %w", err)
+			r.executed = true
+			return
+		}
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Body = io.NopCloser(body)
+	}
 
 	// Execute request
 	resp, err := r.client.httpClient.Do(req)
