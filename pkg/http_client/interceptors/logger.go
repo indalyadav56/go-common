@@ -2,11 +2,9 @@ package interceptors
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -14,53 +12,68 @@ import (
 	"github.com/google/uuid"
 )
 
-// Interceptor defines the interface for HTTP client interceptors
 type Interceptor interface {
 	RoundTrip(req *http.Request) (*http.Response, error)
 }
 
-// Logger interface defines the logging behavior
 type Logger interface {
 	Debug(msg string, fields ...interface{})
 	Info(msg string, fields ...interface{})
 	Error(msg string, fields ...interface{})
 }
 
-// LoggingInterceptor implements http.RoundTripper and provides detailed request/response logging
-type LoggingInterceptor struct {
+type LoggerInterceptor struct {
 	Next           http.RoundTripper
 	Logger         Logger
-	LogRequestBody bool // Option to enable/disable request body logging
-	LogHeaders     bool // Option to enable/disable headers logging
-	MaxBodySize    int  // Maximum body size to log (in bytes)
+	LogRequestBody bool
+	LogHeaders     bool
+	MaxBodySize    int
 }
 
-// LoggingOptions contains configuration for the logging interceptor
 type LoggingOptions struct {
 	LogRequestBody bool
 	LogHeaders     bool
 	MaxBodySize    int
 }
 
-// NewLoggingInterceptor creates a new logging interceptor with the given options
-func NewLoggingInterceptor(next http.RoundTripper, logger Logger, opts LoggingOptions) *LoggingInterceptor {
+func NewLoggerInterceptor(next http.RoundTripper, logger Logger, opts ...*LoggingOptions) *LoggerInterceptor {
 	if next == nil {
 		next = http.DefaultTransport
 	}
+
 	if logger == nil {
-		panic("logger cannot be nil")
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	}
-	return &LoggingInterceptor{
+
+	if len(opts) < 1 {
+		opts = []*LoggingOptions{
+			{
+				LogRequestBody: true,
+				LogHeaders:     true,
+				MaxBodySize:    4096,
+			},
+		}
+	}
+
+	return &LoggerInterceptor{
 		Next:           next,
 		Logger:         logger,
-		LogRequestBody: opts.LogRequestBody,
-		LogHeaders:     opts.LogHeaders,
-		MaxBodySize:    opts.MaxBodySize,
+		LogRequestBody: opts[0].LogRequestBody,
+		LogHeaders:     opts[0].LogHeaders,
+		MaxBodySize:    opts[0].MaxBodySize,
 	}
 }
 
-// RoundTrip implements http.RoundTripper interface
-func (l *LoggingInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
+// Convert map to key-value pairs for slog
+func flattenFields(fields map[string]interface{}) []interface{} {
+	flattened := make([]interface{}, 0, len(fields)*2)
+	for k, v := range fields {
+		flattened = append(flattened, k, v)
+	}
+	return flattened
+}
+
+func (l *LoggerInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("request cannot be nil")
 	}
@@ -70,15 +83,6 @@ func (l *LoggingInterceptor) RoundTrip(req *http.Request) (*http.Response, error
 	if reqID == "" {
 		reqID = uuid.New().String()
 		req.Header.Set("X-Request-ID", reqID)
-	}
-
-	// Create context with timeout if not present
-	ctx := req.Context()
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		req = req.WithContext(ctx)
 	}
 
 	start := time.Now()
@@ -102,7 +106,7 @@ func (l *LoggingInterceptor) RoundTrip(req *http.Request) (*http.Response, error
 		}
 	}
 
-	l.Logger.Info("outgoing request", fields)
+	l.Logger.Info("outgoing request", flattenFields(fields)...)
 
 	// Make the actual request
 	resp, err := l.Next.RoundTrip(req)
@@ -140,12 +144,12 @@ func (l *LoggingInterceptor) RoundTrip(req *http.Request) (*http.Response, error
 		}
 	}
 
-	l.Logger.Info("received response", respFields)
+	l.Logger.Info("received response", flattenFields(fields)...)
 	return resp, nil
 }
 
 // readBody reads the body while preserving it for future reads
-func (l *LoggingInterceptor) readBody(body io.ReadCloser) ([]byte, error) {
+func (l *LoggerInterceptor) readBody(body io.ReadCloser) ([]byte, error) {
 	if body == nil {
 		return nil, nil
 	}
@@ -171,60 +175,4 @@ func truncateBody(body []byte, maxSize int) string {
 		return string(body)
 	}
 	return fmt.Sprintf("%s... [truncated %d bytes]", string(body[:maxSize]), len(body)-maxSize)
-}
-
-// prettyJSON formats JSON data for logging
-func prettyJSON(data interface{}) string {
-	formatted, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("[error formatting JSON: %v]", err)
-	}
-	return string(formatted)
-}
-
-// StandardLogger implements the Logger interface using the standard log package
-type StandardLogger struct {
-	logger *log.Logger
-}
-
-// NewStandardLogger creates a new StandardLogger
-func NewStandardLogger() *StandardLogger {
-	return &StandardLogger{
-		logger: log.New(os.Stdout, "[HTTP] ", log.LstdFlags),
-	}
-}
-
-func (l *StandardLogger) Debug(msg string, fields ...interface{}) {
-	l.log("DEBUG", msg, fields...)
-}
-
-func (l *StandardLogger) Info(msg string, fields ...interface{}) {
-	l.log("INFO", msg, fields...)
-}
-
-func (l *StandardLogger) Error(msg string, fields ...interface{}) {
-	l.log("ERROR", msg, fields...)
-}
-
-func (l *StandardLogger) log(level, msg string, fields ...interface{}) {
-	// Convert fields to a map
-	fieldsMap := make(map[string]interface{})
-	for i := 0; i < len(fields); i += 2 {
-		if i+1 < len(fields) {
-			fieldsMap[fmt.Sprint(fields[i])] = fields[i+1]
-		}
-	}
-
-	// Add message to fields
-	fieldsMap["msg"] = msg
-	fieldsMap["level"] = level
-
-	// Marshal to JSON
-	output, err := json.Marshal(fieldsMap)
-	if err != nil {
-		l.logger.Printf("[%s] %s (error marshaling fields: %v)", level, msg, err)
-		return
-	}
-
-	l.logger.Println(string(output))
 }

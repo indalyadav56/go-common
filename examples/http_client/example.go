@@ -3,13 +3,13 @@ package main
 import (
 	"common/pkg/http_client"
 	"common/pkg/http_client/interceptors"
+	"common/pkg/logger"
 	"context"
 	"fmt"
 	"net/http"
 )
 
 func main() {
-	logger := interceptors.NewStandardLogger()
 
 	client := http_client.New(http_client.Config{
 		BaseURL: "https://jsonplaceholder.typicode.com",
@@ -19,13 +19,13 @@ func main() {
 		// Interceptor: &interceptors.LoggingInterceptor{
 		// 	Next: http.DefaultTransport,
 		// },
-		Interceptor: interceptors.NewLoggingInterceptor(
+		Interceptor: interceptors.NewLoggerInterceptor(
 			http.DefaultTransport,
-			logger,
-			interceptors.LoggingOptions{
-				LogRequestBody: true,
-				LogHeaders:     true,
-			},
+			nil,
+			// interceptors.LoggingOptions{
+			// 	LogRequestBody: true,
+			// 	LogHeaders:     true,
+			// },
 		),
 	})
 
@@ -106,4 +106,45 @@ func main() {
 
 	client.SetBearerToken("Bearer token")
 	client.WithBasicAuth("username", "password")
+
+	// Example-5
+	var user User
+	err = client.Get(context.Background(), "http://jsonplaceholder.typicode.com/posts/1").Into(&user)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	fmt.Println("response========>", user)
+
+	// Example-6 custom logger interceptor
+	myLoggerSrv := logger.New()
+	client2 := http_client.New(http_client.Config{
+		BaseURL: "https://jsonplaceholder.typicode.com",
+		Interceptor: interceptors.NewLoggerInterceptor(
+			nil,
+			// interceptors.NewAuthInterceptor(nil),
+			myLoggerSrv,
+			// nil,
+			&interceptors.LoggingOptions{
+				LogRequestBody: true,
+				LogHeaders:     true,
+			}),
+	})
+
+	var user2 User
+	err = client2.Get(context.Background(), "/posts/1").Into(&user2)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	fmt.Println("response========>", user)
+}
+
+type User struct {
+	UserId int    `json:"userId"`
+	Id     int    `json:"id"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
 }
