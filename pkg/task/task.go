@@ -23,10 +23,10 @@ type AsynqTaskEnqueuer struct {
 	client *asynq.Client
 }
 
-func NewAsynqTaskEnqueuer(redisAddr, redisUsernmae, redisPassword string) *AsynqTaskEnqueuer {
+func NewAsynqTaskEnqueuer(redisAddr, redisUsername, redisPassword string) *AsynqTaskEnqueuer {
 	redisConnection := asynq.RedisClientOpt{
 		Addr:     redisAddr,
-		Username: redisUsernmae,
+		Username: redisUsername,
 		Password: redisPassword,
 	}
 	client := asynq.NewClient(redisConnection)

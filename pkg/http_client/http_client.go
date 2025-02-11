@@ -22,6 +22,8 @@ type Client interface {
 	// Authentication methods
 	SetBearerToken(token string) Client
 	WithBasicAuth(username, password string) Client
+
+	SetGlobalHeaders(headers map[string]string) Client
 }
 
 type RequestBuilder interface {
@@ -175,6 +177,12 @@ func (c *client) SetBearerToken(token string) Client {
 func (c *client) WithBasicAuth(username, password string) Client {
 	c.basicAuth.Username = username
 	c.basicAuth.Password = password
+	return c
+}
+
+// SetGlobalHeaders sets global headers that will be applied to all requests
+func (c *client) SetGlobalHeaders(headers map[string]string) Client {
+	c.globalHeaders = headers
 	return c
 }
 
