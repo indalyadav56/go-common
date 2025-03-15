@@ -19,6 +19,10 @@ To clone a repository which already has submodules, follow these steps
 
 Never run the command `git submodule update --remote`. It will not work as expected for us
 
+## Screenshot
+
+![Screenshot](./screenshots/image.png)
+
 ## Updating a submodule
 
 To update version of a submodule in a repository, follow these steps
